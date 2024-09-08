@@ -1,0 +1,441 @@
+#define left v1
+#define l 0
+#define right v2
+#define r 1
+#define down v1
+#define d 2
+#define up v2
+#define u 3
+#define true 1
+#define false 0
+#define threads_divergence 512
+#define blocks_divergence grid_l*grid_h/threads_divergence
+#define threads_advection 512
+#define blocks_advection grid_l*grid_h/threads_advection
+#define G 0.0
+
+typedef struct s1 {
+	float x;
+	float y;
+}vec2;
+
+typedef struct s2 {
+	float density;
+	unsigned char barrier;
+}cell;
+
+typedef struct s3 {
+	vec2 v1;
+	vec2 v2;
+}double_vec2;
+
+typedef struct s4 {
+	int v1;
+	int v2;
+}double_vec2_ind;
+
+typedef struct s5 {
+	vec2 upVec;
+	vec2 downVec;
+	vec2 rightVec;
+	vec2 leftVec;
+}vec_change;
+
+typedef struct {
+	int x;
+	int y;
+}vec2_ind;
+
+__device__ cell cellGrid[grid_l * grid_h];
+cell cellGridCPU[grid_l * grid_h];
+__device__ vec2 vectorGrid[grid_l * (grid_h + 1) + (grid_l + 1) * grid_h];
+__device__ vec_change vectorGridChanges[grid_l * grid_h];
+vec_change vectorGridChanges_CPU[grid_l * grid_h];
+vec2 vectorGridCPU[grid_l * (grid_h + 1) + (grid_l + 1) * grid_h];
+
+__device__ int get_horizontal_vec_index(int x, int y) {
+	int ret = 0;
+	ret += grid_l;
+	ret += y * 2 * grid_l;
+	ret += y + x;
+	return ret;
+}
+
+__device__ int get_vertical_vec_index(int x, int y) {
+	int ret = 0;
+	ret += y * grid_l * 2 + y;
+	ret += x;
+	return ret;
+}
+
+int get_horizontal_vec_index_CPU(int x, int y) {
+	int ret = 0;
+	ret += grid_l;
+	ret += y * 2 * grid_l;
+	ret += y + x;
+	return ret;
+}
+
+int get_vertical_vec_index_CPU(int x, int y) {
+	int ret = 0;
+	ret += y * grid_l * 2 + y;
+	ret += x;
+	return ret;
+}
+
+__device__ double_vec2 get_vertical_vecs_of_cell(int x, int y) {
+	double_vec2 ret;
+	ret.up = vectorGrid[get_vertical_vec_index(x, y + 1)];
+	ret.down = vectorGrid[get_vertical_vec_index(x, y)];
+	return ret;
+}
+
+__device__ double_vec2 get_horizontal_vecs_of_cell(int x, int y) {
+	double_vec2 ret;
+	ret.left = vectorGrid[get_horizontal_vec_index(x, y)];
+	ret.right = vectorGrid[get_horizontal_vec_index(x + 1, y)];
+	return ret;
+}
+
+__device__ double_vec2_ind get_vertical_vec_inds_of_cell(int x, int y) {
+	double_vec2_ind ret;
+	ret.up = get_vertical_vec_index(x, y+1);
+	ret.down = get_vertical_vec_index(x, y);
+	return ret;
+}
+
+double_vec2_ind get_vertical_vec_inds_of_cell_CPU(int x, int y) {
+	double_vec2_ind ret;
+	ret.up = get_vertical_vec_index_CPU(x, y + 1);
+	ret.down = get_vertical_vec_index_CPU(x, y);
+	return ret;
+}
+
+__device__ double_vec2_ind get_horizontal_vec_inds_of_cell(int x, int y) {
+	double_vec2_ind ret;
+	ret.left = get_horizontal_vec_index(x, y);
+	ret.right = get_horizontal_vec_index(x + 1, y);
+	return ret;
+}
+double_vec2_ind get_horizontal_vec_inds_of_cell_CPU(int x, int y) {
+	double_vec2_ind ret;
+	ret.left = get_horizontal_vec_index_CPU(x, y);
+	ret.right = get_horizontal_vec_index_CPU(x + 1, y);
+	return ret;
+}
+
+__device__ int get_cell_index(int x, int y) {
+	return x + y * grid_l;
+}
+
+__device__ unsigned char in_cell_bounds(int x, int y) {
+	return x >= 0 && x < grid_l && y >= 0 && y < grid_h;
+}
+
+__device__ unsigned char in_h_bounds(int x) {
+	return(x >= 0 && x < grid_l);
+}
+
+__device__ unsigned char in_v_bounds(int y) {
+	return(y >= 0 && y < grid_h);
+}
+
+__device__ unsigned char vert_vec_in_bounds(int x, int y) {
+	return x >= 0 && x < grid_l && y >= 0 && y <= grid_h;
+}
+
+__device__ unsigned char hor_vec_in_bounds(int x, int y) {
+	return x >= 0 && x <= grid_l && y >= 0 && y < grid_h;
+}
+
+__device__ void get_surrounding_vec_status(int x, int y, unsigned char* cptr) {
+	if (in_h_bounds(x - 1) && !(cellGrid[x - 1 + y* grid_l].barrier)) {
+		cptr[l] = 1;
+	}
+	else {
+		cptr[l] = 0;
+	}
+	if (in_h_bounds(x + 1) && !(cellGrid[x + 1 + y * grid_l].barrier)) {
+		cptr[r] = 1;
+	}
+	else {
+		cptr[r] = 0;
+	}
+	if (in_v_bounds(y - 1) && !(cellGrid[x + (y) * grid_l].barrier)) {
+		cptr[d] = 1;
+	}
+	else {
+		cptr[d] = 0;
+	}
+	if (in_v_bounds(y + 1) && !(cellGrid[x + (y + 1) * grid_l].barrier)) {
+		cptr[u] = 1;
+	}
+	else {
+		cptr[u] = 0;
+	}
+}
+
+__device__ void solve_divergence(int cx, int cy) {
+	unsigned char surrounding_status[4];
+	unsigned char numcells = 0;
+	get_surrounding_vec_status(cx, cy, surrounding_status);
+	double_vec2 hv = get_horizontal_vecs_of_cell(cx, cy);
+	double_vec2 vv = get_vertical_vecs_of_cell(cx, cy);
+	float divergence = hv.right.x - hv.left.x - vv.up.y + vv.down.y;
+	for (int i = 0; i < 4; i++) { if (surrounding_status[i]) { numcells++; } }
+	divergence /= (float)numcells;
+	vectorGridChanges[cx + cy * grid_l].rightVec.x -= (surrounding_status[r] ? divergence : 0.0);
+	vectorGridChanges[cx + cy * grid_l].leftVec.x += (surrounding_status[l] ? divergence : 0.0);
+	vectorGridChanges[cx + cy * grid_l].upVec.y += (surrounding_status[u] ? divergence : 0.0);
+	vectorGridChanges[cx + cy * grid_l].downVec.y -= (surrounding_status[d] ? divergence : 0.0);
+}
+
+__global__ void divergence_kernel() {
+	unsigned int ind = threadIdx.x + blockIdx.x * blockDim.x;
+	int y = ind / grid_l;
+	int x = ind % grid_l;
+	solve_divergence(x, y);
+}
+
+vec2 add_vecs_CPU(vec2 v1, vec2 v2) {
+	v1.x += v2.x;
+	v1.y += v2.y;
+	return v1;
+}
+
+__device__ vec2 add_vecs(vec2 v1, vec2 v2) {
+	v1.x += v2.x;
+	v1.y += v2.y;
+	return v1;
+}
+
+__global__ void addChanges() {
+	int x = threadIdx.x;
+	int y = blockIdx.x;
+	double_vec2_ind h_inds = get_horizontal_vec_inds_of_cell(x, y);
+	double_vec2_ind v_inds = get_vertical_vec_inds_of_cell(x, y);
+	if (x == 0) {
+		vectorGrid[h_inds.left] = add_vecs(vectorGrid[h_inds.left], vectorGridChanges[x + y * grid_l].leftVec);
+	}
+	vectorGrid[h_inds.right] = add_vecs(vectorGrid[h_inds.right], vectorGridChanges[x + y * grid_l].rightVec);
+	if (y == 0) {
+		vectorGrid[v_inds.down] = add_vecs(vectorGrid[v_inds.down], vectorGridChanges[x + y * grid_l].downVec);
+	}
+	vectorGrid[v_inds.up] = add_vecs(vectorGrid[v_inds.up], vectorGridChanges[x + y * grid_l].upVec);
+}
+
+void gaussian_divergence(int repetitions) {
+	for (int rep = 0; rep < repetitions; rep++) {
+		for (int b = 0; b < sizeof(vec_change) * grid_l * grid_h; b++) {
+			*((unsigned char*)vectorGridChanges_CPU + b) = 0;
+		}
+		cudaMemcpyToSymbol(vectorGridChanges, vectorGridChanges_CPU, sizeof(vec_change) * grid_l * grid_h);
+		divergence_kernel << <threads_divergence, blocks_divergence >> > ();
+		cudaMemcpyFromSymbol(vectorGridCPU, vectorGrid, sizeof(vec2) * sizeof(vec2) * (grid_l * (grid_h + 1) + (grid_l + 1) * grid_h));
+		cudaMemcpyFromSymbol(vectorGridChanges_CPU, vectorGridChanges, grid_l * grid_h * sizeof(vec_change));
+		//addChanges << <grid_l, grid_h >> > ();
+		for (int x = 0; x < grid_l; x++) {
+			for (int y = 0; y < grid_h; y++) {
+				double_vec2_ind h_inds = get_horizontal_vec_inds_of_cell_CPU(x, y);
+				double_vec2_ind v_inds = get_vertical_vec_inds_of_cell_CPU(x, y);
+				vectorGridCPU[h_inds.left] = add_vecs_CPU(vectorGridCPU[h_inds.left], vectorGridChanges_CPU[x + y * grid_l].leftVec);
+				vectorGridCPU[h_inds.right] = add_vecs_CPU(vectorGridCPU[h_inds.right], vectorGridChanges_CPU[x + y * grid_l].rightVec);
+				vectorGridCPU[v_inds.down] = add_vecs_CPU(vectorGridCPU[v_inds.down], vectorGridChanges_CPU[x + y * grid_l].downVec);
+				vectorGridCPU[v_inds.up] = add_vecs_CPU(vectorGridCPU[v_inds.up], vectorGridChanges_CPU[x + y * grid_l].upVec);
+			}
+		}
+		cudaMemcpyToSymbol(vectorGrid, vectorGridCPU, sizeof(vec2) * (grid_l * (grid_h + 1) + (grid_l + 1) * grid_h));
+	}
+}
+
+__device__ vec2_ind new_vec2_ind(int x, int y) {
+	vec2_ind ret;
+	ret.x = x;
+	ret.y = y;
+	return ret;
+}
+
+__device__ float vert_avg_around_hor(int x, int y) {
+	float total_vert = 0.0;
+	unsigned char numVecs = 0;
+	vec2_ind topRight = new_vec2_ind(x, y);
+	vec2_ind topLeft = new_vec2_ind(x - 1, y);
+	vec2_ind bottomRight = new_vec2_ind(x, y - 1);
+	vec2_ind bottomLeft = new_vec2_ind(x - 1, y - 1);
+	if (vert_vec_in_bounds(topRight.x, topRight.y)) {
+		total_vert += vectorGrid[get_vertical_vec_index(topRight.x, topRight.y)].y;
+		numVecs++;
+	}
+	if (vert_vec_in_bounds(topLeft.x, topLeft.y)) {
+		total_vert += vectorGrid[get_vertical_vec_index(topLeft.x, topLeft.y)].y;
+		numVecs++;
+	}
+	if (vert_vec_in_bounds(bottomRight.x, bottomRight.y)) {
+		total_vert += vectorGrid[get_vertical_vec_index(bottomRight.x, bottomRight.y)].y;
+		numVecs++;
+	}
+	if (vert_vec_in_bounds(bottomLeft.x, bottomLeft.y)) {
+		total_vert += vectorGrid[get_vertical_vec_index(bottomLeft.x, bottomLeft.y)].y;
+		numVecs++;
+	}
+	return total_vert / numVecs;
+}
+
+__device__ float hor_avg_around_vert(int x, int y) {
+	float total_hor = 0.0;
+	unsigned char numVecs = 0;
+	vec2_ind topRight = new_vec2_ind(x + 1, y);
+	vec2_ind topLeft = new_vec2_ind(x, y);
+	vec2_ind bottomRight = new_vec2_ind(x + 1, y - 1);
+	vec2_ind bottomLeft = new_vec2_ind(x, y - 1);
+	if (hor_vec_in_bounds(topRight.x, topRight.y)) {
+		total_hor += vectorGrid[get_horizontal_vec_index(topRight.x, topRight.y)].x;
+		numVecs++;
+	}
+	if (hor_vec_in_bounds(topLeft.x, topLeft.y)) {
+		total_hor += vectorGrid[get_horizontal_vec_index(topLeft.x, topLeft.y)].x;
+		numVecs++;
+	}
+	if (hor_vec_in_bounds(bottomRight.x, bottomRight.y)) {
+		total_hor += vectorGrid[get_horizontal_vec_index(bottomRight.x, bottomRight.y)].x;
+		numVecs++;
+	}
+	if (hor_vec_in_bounds(bottomLeft.x, bottomLeft.y)) {
+		total_hor += vectorGrid[get_horizontal_vec_index(bottomLeft.x, bottomLeft.y)].x;
+		numVecs++;
+	}
+	return total_hor / numVecs;
+}
+
+__device__ vec2 flip_vec(vec2 v) {
+	v.x *= -1.0;
+	v.y *= -1.0;
+	return v;
+}
+
+__device__ float f_mod(float i, float m) {
+	while (i > m) {
+		i -= m;
+	}
+	return i;
+}
+
+__device__ float f_abs(float i) {
+	return (i > 0.0) ? i : i * -1.0;
+}
+
+__device__ unsigned char is_sharing_hor(int x) {
+	return x > 0 && x < grid_l;
+}
+
+__device__ unsigned char is_sharing_vert(int y) {
+	return y > 0 && y < grid_h;
+}
+
+__device__ vec2 prev_val_of_hor_vec(int x, int y) {
+	vec2 val = vectorGrid[get_horizontal_vec_index(x, y)];
+	val.y = vert_avg_around_hor(x, y);
+	val = flip_vec(val);
+	// celija (x,y) je sa desne strane vektora
+	int xChange = (int)val.x;
+	xChange -= val.x < 0.0;
+	int yChange = 0;
+	unsigned char p = val.y > 0.0;
+	unsigned char px = val.x > 0.0;
+	if (fabs(val.y) >= 0.5) { yChange += p ? 1 : -1; }
+	val.y -= p ? 0.5 : -0.5;
+	yChange += int(val.y);
+	if (!in_cell_bounds(x + xChange, y + yChange)) { return val; }
+	double_vec2 h_vecs = get_horizontal_vecs_of_cell(x + xChange, y + yChange);
+	float sx = val.x;
+	val.x = px ? fabs(fmodf(sx, 1.0f)) * h_vecs.left.x + h_vecs.right.x * (1.0f - fabs(fmodf(sx, 1.0f))) : (1.0f - fabs(fmodf(sx, 1.0f))) * h_vecs.left.x + h_vecs.right.x * fabs(fmodf(sx, 1.0f));
+	return val;
+}
+
+__device__ vec2 prev_val_of_vert_vec(int x, int y) {
+	vec2 val = vectorGrid[get_vertical_vec_index(x, y)];
+	val.x = hor_avg_around_vert(x, y);
+	val = flip_vec(val);
+	// celija (x,y) je sa desne strane vektora
+	int yChange = (int)val.y;
+	yChange += val.y < 0.0;
+	int xChange = 0;
+	unsigned char p = val.x > 0.0;
+	unsigned char py = val.y > 0.0;
+	if (fabs(val.x) >= 0.5) { xChange += p ? 1 : -1; }
+	val.x -= p ? 0.5 : -0.5;
+	xChange += int(val.x);
+	if (!in_cell_bounds(x + xChange, y + yChange)) { return val; }
+	double_vec2 v_vecs = get_vertical_vecs_of_cell(x + xChange, y + yChange);
+	float sy = val.y;
+	val.y = py ? fabs(fmodf(sy, 1.0f)) * v_vecs.left.y + v_vecs.right.y * (1.0f - fabs(fmodf(sy, 1.0f))) : (1.0f - fabs(fmodf(sy, 1.0f))) * v_vecs.left.y + v_vecs.right.y * fabs(fmodf(sy, 1.0f));
+	return val;
+}
+
+__global__ void advection_kernel_horizontal() {
+	int t_id = threadIdx.x + blockIdx.x * threads_advection;
+	int x = t_id % grid_l;
+	int y = t_id / grid_l;
+	vectorGridChanges[t_id].rightVec = prev_val_of_hor_vec(x + 1, y);
+	if (x == 0) {
+		vectorGridChanges[t_id].leftVec = prev_val_of_hor_vec(x, y);
+	}
+}
+
+__global__ void advection_kernel_vertical() {
+	int t_id = threadIdx.x + blockIdx.x * threads_advection;
+	int x = t_id % grid_l;
+	int y = t_id / grid_l;
+	vectorGridChanges[t_id].upVec = prev_val_of_vert_vec(x, y + 1);
+	if (y == 0) {
+		vectorGridChanges[t_id].downVec = prev_val_of_vert_vec(x, y);
+	}
+}
+
+void semi_lagrangian_advection() {
+	advection_kernel_horizontal << <threads_advection, blocks_advection >> > ();
+	advection_kernel_vertical << <threads_advection, blocks_advection >> > ();
+	cudaMemcpyFromSymbol(vectorGridCPU, vectorGrid, sizeof(vec2) * (grid_l * (grid_h + 1) + (grid_l + 1) * grid_h));
+	cudaMemcpyFromSymbol(vectorGridChanges_CPU, vectorGridChanges, sizeof(vec_change) * grid_l*grid_h);
+	for (int x = 0; x < grid_l; x++) {
+		for (int y = 0; y < grid_h; y++) {
+			double_vec2_ind h_inds = get_horizontal_vec_inds_of_cell_CPU(x, y);
+			double_vec2_ind v_inds = get_vertical_vec_inds_of_cell_CPU(x, y);
+			vectorGridCPU[h_inds.right] = vectorGridChanges_CPU[x + y * grid_l].rightVec;
+			if (x == 0) {
+				vectorGridCPU[h_inds.left] = vectorGridChanges_CPU[x + y * grid_l].leftVec;
+			}
+			vectorGridCPU[v_inds.up] = vectorGridChanges_CPU[x + y * grid_l].upVec;
+			if (y == 0) {
+				vectorGridCPU[v_inds.down] = vectorGridChanges_CPU[x + y * grid_l].downVec;
+			}
+		}
+	}
+	cudaMemcpyToSymbol(vectorGrid, vectorGridCPU, sizeof(vec2) * (grid_l * (grid_h + 1) + (grid_l + 1) * grid_h));
+	cudaError_t err = cudaGetLastError();
+	if (err != cudaSuccess) printf("advection kernel error: %s\n", cudaGetErrorString(err));
+}
+
+void navier_stokes_simulation() {
+	gaussian_divergence(1);
+	semi_lagrangian_advection();
+	cudaMemcpyFromSymbol(vectorGridCPU, vectorGrid, sizeof(vec2) * (grid_l * (grid_h + 1) + (grid_l + 1) * grid_h));
+}
+
+void prepare_sim() {
+	memset(vectorGridCPU, 0, sizeof(vectorGridCPU));
+	memset(cellGridCPU, 0, sizeof(cellGridCPU));
+	for (int y = 0; y < grid_h; y++) {
+		for (int x = 0; x < 10; x++) {
+			vectorGridCPU[get_vertical_vec_index_CPU(x, y)].x = 1.0f;
+			vectorGridCPU[get_vertical_vec_index_CPU(grid_l - x, y)].x = 1.0f;
+		}
+	}
+	for (int x = 100; x < 101; x++) {
+		for (int y = 200; y < 250; y++) {
+			cellGridCPU[x + y * grid_l].barrier = 1;
+		}
+	}
+	cudaMemcpyToSymbol(vectorGrid, vectorGridCPU, sizeof(vec2) * (grid_l * (grid_h + 1) + (grid_l + 1) * grid_h));
+	cudaMemcpyToSymbol(cellGrid, cellGridCPU, sizeof(cell) * grid_l * grid_h);
+}
