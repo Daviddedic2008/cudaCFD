@@ -10,285 +10,132 @@
 #include <glad/glad.h>
 #include <glfw3.h>
 
+// init of structs and methods as well as global vars and respective functions and macros
+//*****************************************************************************************************************************************************************************************
+
+// sizes for cfd
 #define grid_l 512
 #define grid_h 512
-#define xVal val
-#define yVal val
-#define totalNumVecs grid_l * (grid_h + 1) + (grid_l + 1) * grid_h
-#define totalNumCells grid_l * grid_h
-#define getCellIndex(xargs, yargs) xargs + yargs * grid_l
-#define getVerticalVecIndex(xargs, yargs) getHorizontalVecIndex(xargs, yargs) - grid_l
-#define getHorizontalVecIndex(xargs, yargs) xargs + grid_l * (yargs+1) + (grid_l+1) * yargs
-#define rightVecIndexOfCell(xargs, yargs) getHorizontalVecIndex((xargs+1), yargs)
-#define leftVecIndexOfCell(xargs, yargs) getHorizontalVecIndex(xargs, yargs)
-#define upVecIndexOfCell(xargs, yargs) getVerticalVecIndex(xargs, (yargs+1))
-#define downVecIndexOfCell(xargs, yargs) getVerticalVecIndex(xargs, yargs)
-#define rightValCell(xargs, yargs) vectorGrid[rightVecIndexOfCell(xargs, yargs)].val
-#define leftValCell(xargs, yargs) vectorGrid[leftVecIndexOfCell(xargs, yargs)].val
-#define upValCell(xargs, yargs) vectorGrid[upVecIndexOfCell(xargs, yargs)].val
-#define downValCell(xargs, yargs) vectorGrid[downVecIndexOfCell(xargs, yargs)].val
-#define inHorBounds(xargs, yargs) (xargs <= grid_l && xargs >= 0 && yargs < grid_h && yargs >= 0)
-#define inVertBounds(xargs, yargs) (xargs < grid_l && xargs >= 0 && yargs <= grid_h && yargs >= 0)
-#define inCellBounds(xargs, yargs) (xargs < grid_l && xargs >= 0 && yargs < grid_h && yargs >= 0)
-#define inObstacleBounds(xargs, yargs) !cellGrid[getCellIndex(xargs, yargs)].obstacle
-#define threads_divergence 512
-#define blocks_divergence totalNumCells/threads_divergence
 
 
-#define signf(f) f > 0.0f ? 1.0f : -1.0f
+// vector for 2d cfd
+struct vec2 {
+    float x, y;
 
-typedef struct{
-    float val;
-}vec;
+    __host__ __device__ vec2() : x(0), y(0) {}
 
-typedef struct {
-    vec upChange;
-    vec downChange;
-    vec rightChange;
-    vec leftChange;
-}cellChange;
+    __host__ __device__ vec2(float X, float Y) : x(X), y(Y) {}
 
-typedef struct {
-    unsigned char obstacle;
-}cell;
-
-__device__ vec vectorGrid[totalNumVecs];
-vec vectorGridCPU[totalNumVecs];
-__device__ cellChange vectorGridChanges[totalNumCells];
-cellChange vectorGridChangesCPU[totalNumCells];
-__device__ cell cellGrid[totalNumCells];
-cell cellGridCPU[totalNumCells];
-__device__ vec vectorGridBuffer[totalNumVecs];
-
-
-// 0 : R 
-// 1 : L 
-// 2 : U 
-// 3 : D
-
-// 0 : R 
-// 1 : L 
-// 2 : U 
-// 3 : D
-
-__global__ void addAdvection() {
-    int id = threadIdx.x + blockIdx.x * blockDim.x;
-    int x = id % grid_l;
-    int y = id / grid_l;
-    if (x == 0) { vectorGrid[leftVecIndexOfCell(x, y)] = vectorGridBuffer[leftVecIndexOfCell(x, y)]; }
-    if (y == 0) { vectorGrid[downVecIndexOfCell(x, y)] = vectorGridBuffer[downVecIndexOfCell(x, y)]; }
-    vectorGrid[rightVecIndexOfCell(x, y)] = vectorGridBuffer[rightVecIndexOfCell(x, y)];
-    vectorGrid[upVecIndexOfCell(x, y)] = vectorGridBuffer[upVecIndexOfCell(x, y)];
-}
-
-void clearVecBuffer() {
-    cudaMemset(vectorGridBuffer, sizeof(vectorGridBuffer), 0);
-}
-
-__global__ void divergence_kernel(unsigned char r) {
-    int id = threadIdx.x + blockIdx.x * blockDim.x;
-    if ((id % 2 == 0) ^ r) { return; }
-    if (cellGrid[id].obstacle) { return; }
-    if (id >= totalNumCells) { return; }
-    int x = id % grid_l;
-    int y = id / grid_l;
-    float divergence = upValCell(x, y) - upValCell(x, y-1) + rightValCell(x, y) - leftValCell(x, y);
-    unsigned char stat[4];
-    stat[0] = x < grid_l-1;
-    if (x+1 < grid_l) {
-        stat[0] = cellGrid[id + 1].obstacle ? 0 : stat[0];
-    }
-    stat[1] = x > 0;
-    if (x-1 >= 0) {
-        stat[1] = cellGrid[id - 1].obstacle ? 0 : stat[1];
-    }
-    stat[2] = y < 320;
-    if (y+1 < grid_h) {
-        stat[2] = cellGrid[id + grid_l].obstacle ? 0 : stat[2];
-    }
-    stat[3] = y > 0;
-    if (y-1 >= 0) {
-        stat[3] = cellGrid[id - grid_l].obstacle ? 0 : stat[3];
+    inline __host__ __device__ vec2 operator+(const vec2& f) const {
+        return vec2(x + f.x, y + f.y);
     }
 
-    divergence = divergence / (float)(stat[0] + stat[1] + stat[2] + stat[3]);
-    vectorGridChanges[id].rightChange.val = stat[0] ? -1.0f * divergence : 0.0f;
-    vectorGridChanges[id].leftChange.val = stat[1] ? divergence : 0.0f;
-    vectorGridChanges[id].upChange.val = stat[2] ? -1.0f * divergence : 0.0f;
-    vectorGridChanges[id].downChange.val = stat[3] ? divergence : 0.0f;
-}
-
-__global__ void zeroVecChanges() {
-    int id = threadIdx.x + blockIdx.x * grid_l;
-    vectorGridChanges[id].rightChange.val = 0.0f;
-    vectorGridChanges[id].leftChange.val = 0.0f;
-    vectorGridChanges[id].upChange.val = 0.0f;
-    vectorGridChanges[id].downChange.val = 0.0f;
-}
-
-__global__ void addChangesUpRight() {
-    int id = threadIdx.x + blockIdx.x * grid_l;
-    int x = id % grid_l;
-    int y = id / grid_l;
-    vectorGrid[rightVecIndexOfCell(x, y)].val += vectorGridChanges[id].rightChange.val;
-    vectorGrid[upVecIndexOfCell(x, y)].val += vectorGridChanges[id].upChange.val;
-}
-
-__global__ void addChangesDownLeft() {
-    int id = threadIdx.x + blockIdx.x * grid_l;
-    int x = id % grid_l;
-    int y = id / grid_l;
-    vectorGrid[leftVecIndexOfCell(x, y)].val += vectorGridChanges[id].leftChange.val;
-    vectorGrid[downVecIndexOfCell(x, y)].val += vectorGridChanges[id].downChange.val;
-}
-
-void addChanges() {
-    addChangesDownLeft << <grid_l, grid_h >> > ();
-    
-    addChangesUpRight << <grid_l, grid_h >> > ();
-    /*cudaMemcpyFromSymbol(vectorGridCPU, vectorGrid, sizeof(vec) * totalNumVecs);
-    cudaMemcpyFromSymbol(vectorGridChangesCPU, vectorGridChanges, sizeof(cellChange) * totalNumCells);
-    for (int y = 0; y < grid_h; y++) {
-        for (int x = 0; x < grid_l; x++) {
-            vectorGridCPU[rightVecIndexOfCell(x, y)].val += vectorGridChangesCPU[getCellIndex(x, y)].rightChange.val;
-            vectorGridCPU[leftVecIndexOfCell(x, y)].val += vectorGridChangesCPU[getCellIndex(x, y)].leftChange.val;
-            vectorGridCPU[upVecIndexOfCell(x, y)].val += vectorGridChangesCPU[getCellIndex(x, y)].upChange.val;
-            vectorGridCPU[downVecIndexOfCell(x, y)].val += vectorGridChangesCPU[getCellIndex(x, y)].downChange.val;
-        }
+    inline __host__ __device__ vec2 operator-(const vec2& f) const {
+        return vec2(x - f.x, y - f.y);
     }
-    cudaMemcpyToSymbol(vectorGrid, vectorGridCPU, sizeof(vec) * totalNumVecs);*/
-}
 
-void printChange(cellChange c) {
-    printf("right %f, left %f, up %f, down %f\n", c.rightChange.val, c.leftChange.val, c.upChange.val, c.downChange.val);
-}
-
-void solveDivergence(int num_reps) {
-    zeroVecChanges << <grid_l, grid_h >> > (); // provereno
-    divergence_kernel << <grid_l, grid_h >> > (0);
-    addChanges();
-    zeroVecChanges << <grid_l, grid_h >> > ();
-    divergence_kernel << <grid_l, grid_h >> > (1);
-    //printf("kernel err: %s\n", cudaGetErrorString(err));
-    //cudaMemcpyFromSymbol(vectorGridChangesCPU, vectorGridChanges, sizeof(cellChange) * totalNumCells);
-    addChanges();
-}
-
-__global__ void advectionKernelHorizontal() {
-    int id = threadIdx.x + blockIdx.x * blockDim.x;
-    int x = id % (grid_l + 1);
-    int y = id / (grid_l + 1);
-    if (inCellBounds(x, y)) {
-        if (cellGrid[getCellIndex(x, y)].obstacle) { goto skpRight; }
+    inline __host__ __device__ vec2 operator*(const float scalar) const {
+        return vec2(x * scalar, y * scalar);
     }
-    if (inCellBounds(x-1, y)) {
-        if (cellGrid[getCellIndex(x - 1, y)].obstacle) { goto skpRight; }
-    }
-    if (x == 0 || x == grid_l) { goto skpRight; }
-    float yv = 0;
-    int num;
-    for (int yo = 0; yo <= 1; yo++) {
-        for (int xo = -1; xo <= 0; xo++) {
-            if (inVertBounds(x + xo, y + yo)) {
-                num++; yv += vectorGrid[getVerticalVecIndex(x + xo, y + yo)].val; 
-            }
-        }   
-    }
-    yv /= num * -1;
-    float xv = -1 * vectorGrid[getHorizontalVecIndex(x, y)].val;
-    int xChange = ((int)xv) - ((xv < 0.0f) ? 1 : 0);
-    int yChange = (int)(yv + (yv > 0.0f ? 0.5f : -0.5f));
-    if (!inCellBounds(x + xChange, y + yChange)) { goto skpRight; }
-    else { if (!inObstacleBounds(x + xChange, y + yChange)) { goto skpRight; } }
-    float leftPercent = (xv > 0.0f ? fabs((fmodf(xv, 1.0f))) : (1.0f - fabs((fmodf(xv, 1.0f)))));
-    float rightPercent = 1.0f - leftPercent;
-    vectorGridBuffer[getHorizontalVecIndex(x, y)].val = rightValCell(x + xChange, y + yChange) * rightPercent + leftValCell(x + xChange, y + yChange) * leftPercent;
-    return;
-skpRight:;
-    vectorGridBuffer[getHorizontalVecIndex(x, y)] = vectorGrid[getHorizontalVecIndex(x, y)];
+};
+
+// global array for storing vecs
+__device__ char vectors[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)];
+__device__ char vectorBuffer[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)]; // used for divergence change and advection storage
+
+__device__ bool barrier[grid_l * grid_h];
+
+// macros for accessing array
+// * "top" of a cell is lower in index than "bottom"
+// * "top" of a cell is positive(if positive, then contribution to divergence is positive)
+// * "right" of cell is higher in index than "left"
+// * "right" of a cell is positive(if positive, then contribution to divergence is positive)
+// * "left" and "down" negatively contribute to divergence
+#define numHorizontal ((grid_l+1) * grid_h)
+#define numVertical ((grid_h+1)*grid_l)
+
+#define horizontalVectors ((vec2*)vectors)
+#define verticalVectors ((vec2*)(vectors + numHorizontal * sizeof(vec2)))
+
+#define rightVecIndex(cellX, cellY) (cellX + 1 + cellY * (grid_l + 1)) 
+#define leftVecIndex(cellX, cellY) (cellX + cellY * (grid_l + 1))
+#define upVecIndex(cellX, cellY) (cellX + cellY * grid_l)
+#define downVecIndex(cellX, cellY) (cellX + (cellY+1) * grid_l)
+
+// init grid
+inline __device__ void init_vec() {
+    const int id = threadIdx.x + blockIdx.x * blockDim.x;
+    const int x = id % grid_l;
+    const int y = id / grid_h;
+
+    // set all vals to 0
+    horizontalVectors[rightVecIndex(x, y)] = vec2();
+    horizontalVectors[leftVecIndex(x, y)] = vec2();
+    verticalVectors[upVecIndex(x, y)] = vec2();
+    verticalVectors[downVecIndex(x, y)] = vec2();
 }
 
-__global__ void advectionKernelVertical() {
-    int id = threadIdx.x + blockIdx.x * blockDim.x;
-    int x = id % grid_l;
-    int y = id / grid_l;
-    if (cellGrid[getCellIndex(x, y)].obstacle) { goto skpUp; }
-    if (inCellBounds(x-1, y)) { if (cellGrid[getCellIndex(x-1, y)].obstacle) { goto skpUp; } }
-    float xv = 0.0f;
-    int num = 0;
-    for (int xo = 0; xo <= 1; xo++) {
-        for (int yo = -1; yo <= 0; yo++) {
-            if (inHorBounds(x + xo, y + yo)) {
-                num++; xv += vectorGrid[getHorizontalVecIndex(x + xo, y + yo)].val;
-            }
-        }
+// sets both left and right vecs of cell to v
+inline __device__ void set_horizontal_vec_cell(const vec2 v, const int x, const int y) {
+    horizontalVectors[rightVecIndex(x, y)] = v;
+    horizontalVectors[leftVecIndex(x, y)] = v;
+}
+
+// sets both up and down vecs of cell to v
+inline __device__ void set_vertical_vec_cell(const vec2 v, const int x, const int y) {
+    verticalVectors[upVecIndex(x, y)] = v;
+    verticalVectors[downVecIndex(x, y)] = v;
+}
+
+// init barrier
+inline __device__ void init_barrier() {
+    const int id = threadIdx.x + blockIdx.x * blockDim.x;
+    barrier[id] = false;
+}
+
+// set val for a single barrier
+inline __device__ void set_barrier(const int x, const int y) {
+    barrier[x + y * grid_l] = true;
+}
+
+// divergence functions and kernel
+//*****************************************************************************************************************************************************************************************
+
+// calcs divergence for a single cell
+inline __device__ float calc_divergence(const int x, const int y) {
+    return verticalVectors[upVecIndex(x, y)].y - verticalVectors[downVecIndex(x, y)].y + horizontalVectors[rightVecIndex(x, y)].x - horizontalVectors[leftVecIndex(x, y)].x;
+}
+
+inline __device__ void apply_divergence(const int x, const int y) {
+    float divergence = calc_divergence(x, y);
+    unsigned char num_affected = 0;
+    bool affected_cells[4];
+    for (int i = 0; i < 4; i++) {
+        affected_cells[i] = false;
     }
-    xv /= -1 * num;
-    float yv = vectorGrid[getVerticalVecIndex(x, y)].val * -1;
-    int xChange, yChange;
-    xChange = (int)(xv + signf(xv) * 0.5f);
-    yChange = (int)yv - ((yv < 0.0f) ? 1 : 0);
-    if (!inCellBounds(x + xChange, y + yChange)) { goto skpUp; }
-    if(!inObstacleBounds(x + xChange, y + yChange)) { goto skpUp; }
-    float upPercent = (yv < 0.0f) ? fabs(fmodf(yv, 1.0f)) : 1.0f - fabs(fmodf(yv, 1.0f));
-    float downPercent = 1.0f - fabs(upPercent);
-    vectorGridBuffer[getVerticalVecIndex(x, y)].val = upValCell(x + xChange, y + yChange) * upPercent + upValCell(x + xChange, y + yChange-1) * downPercent;
-    //if (yChange != 0) { printf("%d\n", yChange); }
-skpUp:;
-}
 
-void solveAdvection() {
-    clearVecBuffer();
-    advectionKernelHorizontal << <grid_l, grid_h + 1 >> > ();
-    //advectionKernelVertical << <grid_l, grid_h + 1 >> > ();
-    addAdvection << <grid_l, grid_h >> > ();
-}
-
-void navierStokes(int divergence_reps) {
-    for (int i = 0; i < 10; i++) {
-        solveDivergence(divergence_reps);
+    // get rights
+    #pragma unroll
+    for (int xo = -1; xo < 1; xo += 2) {
+        bool tmp = barrier[x + xo + y * grid_l];
+        num_affected += tmp;
+        affected_cells[(xo + 1) / 2] = tmp;
     }
-    solveAdvection();
-    cudaMemcpyFromSymbol(vectorGridCPU, vectorGrid, sizeof(vec) * totalNumVecs);
-}
 
-__global__ void setup(unsigned char x, unsigned char barrier) {
-    int id = threadIdx.x + blockIdx.x * blockDim.x;
-    for (int v = 0; v < x ? grid_h : grid_h; v++) {
-        int v1 = x ? id : v;
-        int v2 = x ? v : id;
-        vectorGrid[getHorizontalVecIndex(v1, v2)].val = 1.0f;
+    // get bottoms
+    #pragma unroll
+    for (int yo = -1; yo < 1; yo += 2) {
+        num_affected += barrier[x + (y+yo) * grid_l];
     }
+
+    divergence /= num_affected;
+
 }
 
-int dist(int x1, int y1, int x2, int y2) {
-    return sqrt((float)(x1 - x2) * (float)(x1 - x2) + (float)(y1 - y2) * (float)(y1 - y2));
-}
-
-void setupCPU() {
-    memset(vectorGridCPU, 0, sizeof(vectorGridCPU));
-    for (int y = 0; y < grid_h; y++) {
-        for (int x = grid_l-1; x > grid_l-2; x--) {
-            vectorGridCPU[rightVecIndexOfCell(x, y)].val = -0.9f;
-            vectorGridCPU[leftVecIndexOfCell(x, y)].val = -0.9f;
-        }
-        for (int x = 0; x < 1; x++) {
-            vectorGridCPU[rightVecIndexOfCell(x, y)].val = -0.9f;
-            vectorGridCPU[leftVecIndexOfCell(x, y)].val = -0.9f;
-        }
-    }
-    memset(cellGridCPU, 0, sizeof(cellGridCPU));
-    for (int y = 0; y < 320; y++) {
-        for (int x = 0; x < grid_l; x++) {
-            if (dist(x, y, 200, 200) < 30) {
-                cellGridCPU[getCellIndex(x, y)].obstacle = 1;
-            }
-        }
-    }
-    cudaMemcpyToSymbol(vectorGrid, vectorGridCPU, sizeof(vec) * totalNumVecs);
-    cudaMemcpyToSymbol(cellGrid, cellGridCPU, sizeof(cell) * totalNumCells);
-}
-
+//*****************************************************************************************************************************************************************************************
+// opengl stuff
+// draws 2 triangles at z=0 and textures them with the pixel colors outputted by the cuda program
+// no interop, data transfers from GPU to CPU and back to GPU each frame
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void processInput(GLFWwindow* window);
 
@@ -409,7 +256,6 @@ int main()
 
     unsigned int texture1;
     uint8_t pixels[grid_h * grid_l * 3];
-    setupCPU();
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glGenTextures(1, &texture1);
     glBindTexture(GL_TEXTURE_2D, texture1);
@@ -422,33 +268,15 @@ int main()
 	glGenerateMipmap(GL_TEXTURE_2D);
     glUseProgram(shaderProgram); 
     glUniform1i(glGetUniformLocation(shaderProgram, "texture1"), 0);
-    for (int jebi = 0; jebi < 2; jebi++) {
-        //navierStokes(1);
-    }
-
     while (!glfwWindowShouldClose(window))
     {
         processInput(window);
         glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
-		// update pixel array here
-        navierStokes(1);
         int ind = 0;
-        for (int y = 0; y < grid_h; y++) {
-            for (int x = 0; x < grid_l; x++) {
-                float v1 = truncate(vectorGridCPU[upVecIndexOfCell(x, y)].val + vectorGridCPU[rightVecIndexOfCell(x, y)].val * 2.0f);
-                float v2 = truncate(vectorGridCPU[downVecIndexOfCell(x, y)].val + vectorGridCPU[leftVecIndexOfCell(x, y)].val * 2.0f);
-                pixels[ind] = v2 * 255;
-                pixels[ind + 1] = v1 * 255;
-                pixels[ind + 2] = 0;
-                if (cellGridCPU[x + y * grid_l].obstacle) {
-                    pixels[ind] = 255;
-                    pixels[ind + 1] = 255;
-                    pixels[ind + 2] = 255;
-                }
-                ind += 3;
-            }
-        }
+        // **
+        // dodaj boje tu u pixels
+        // **
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, grid_l, grid_h, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
 		glGenerateMipmap(GL_TEXTURE_2D);
         // bind textures on corresponding texture units
