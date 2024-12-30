@@ -57,6 +57,9 @@ __device__ bool barrier[grid_l * grid_h];
 #define horizontalVectors ((vec2*)vectors)
 #define verticalVectors ((vec2*)(vectors + numHorizontal * sizeof(vec2)))
 
+#define horizontalVectorsBuffer ((vec2*)vectorsBuffer)
+#define verticalVectorsBuffer ((vec2*)(vectorsBuffer + numHorizontal * sizeof(vec2)))
+
 #define rightVecIndex(cellX, cellY) (cellX + 1 + cellY * (grid_l + 1)) 
 #define leftVecIndex(cellX, cellY) (cellX + cellY * (grid_l + 1))
 #define upVecIndex(cellX, cellY) (cellX + cellY * grid_l)
@@ -106,10 +109,15 @@ inline __device__ float calc_divergence(const int x, const int y) {
     return verticalVectors[upVecIndex(x, y)].y - verticalVectors[downVecIndex(x, y)].y + horizontalVectors[rightVecIndex(x, y)].x - horizontalVectors[leftVecIndex(x, y)].x;
 }
 
+#define L 0
+#define R 1
+#define T 2
+#define B 3
 inline __device__ void apply_divergence(const int x, const int y) {
     float divergence = calc_divergence(x, y);
     unsigned char num_affected = 0;
     bool affected_cells[4];
+    #pragma unroll
     for (int i = 0; i < 4; i++) {
         affected_cells[i] = false;
     }
@@ -117,7 +125,7 @@ inline __device__ void apply_divergence(const int x, const int y) {
     // get rights
     #pragma unroll
     for (int xo = -1; xo < 1; xo += 2) {
-        bool tmp = barrier[x + xo + y * grid_l];
+        const bool tmp = barrier[x + xo + y * grid_l];
         num_affected += tmp;
         affected_cells[(xo + 1) / 2] = tmp;
     }
@@ -125,11 +133,48 @@ inline __device__ void apply_divergence(const int x, const int y) {
     // get bottoms
     #pragma unroll
     for (int yo = -1; yo < 1; yo += 2) {
-        num_affected += barrier[x + (y+yo) * grid_l];
+        const bool tmp = barrier[x + (y + yo) * grid_l];
+        num_affected += tmp;
+        affected_cells[(yo + 5) / 2] = tmp;
     }
 
     divergence /= num_affected;
 
+    // subtract the divergence equally from each affected vector(not blocked by a barrier)
+    verticalVectors[upVecIndex(x, y)].y -= divergence * affected_cells[T]; // up
+    verticalVectors[downVecIndex(x, y)].y += divergence * affected_cells[B]; // down
+    horizontalVectors[rightVecIndex(x, y)].y -= divergence * affected_cells[R]; // right
+    horizontalVectors[leftVecIndex(x, y)].y -= divergence * affected_cells[L]; // left
+}
+
+// divergence equations are solved(variables eliminated) using gaussian elimination, and each iteration is done in 2 passes
+// each pass is either "white" or "black", and these colors represent the squares on a checkerboard
+
+// threads per block divergence
+#define threads_divergence 512
+#define blocks_divergence (grid_l * grid_h / 2) / threads_divergence + 1
+
+// divergence kernel "white"
+__global__ void divergenceGaussianW() {
+    const int id = threadIdx.x + blockIdx.x * blockDim.x;
+    const int cellId = id * 2; // account for checkerboard spacing
+    apply_divergence(cellId % grid_l, cellId / grid_l); // may remove this func due to overhead
+}
+
+// divergence kernel "black"
+__global__ void divergenceGaussianB() {
+    const int id = threadIdx.x + blockIdx.x * blockDim.x;
+    const int cellId = id * 2 + 1; // account for checkerboard spacing
+    if (cellId >= grid_l * grid_h) { return; }
+    apply_divergence(cellId % grid_l, cellId / grid_l); // may remove this func due to overhead
+}
+
+// cpu function to call kernels
+void gaussianDivergenceSolver(const int passes) {
+    for (int p = 0; p < passes; p++) {
+        divergenceGaussianW << <threads_divergence, blocks_divergence >> > ();
+        divergenceGaussianB << <threads_divergence, blocks_divergence >> > ();
+    }
 }
 
 //*****************************************************************************************************************************************************************************************
