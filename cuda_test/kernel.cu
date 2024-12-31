@@ -19,6 +19,7 @@
 
 
 // vector for 2d cfd
+#pragma pack(push, 4) // seems optimal to me
 struct vec2 {
     float x, y;
 
@@ -38,10 +39,12 @@ struct vec2 {
         return vec2(x * scalar, y * scalar);
     }
 };
+#pragma pop
 
-// global array for storing vecs
-__device__ char vectors[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)];
-__device__ char vectorBuffer[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)]; // used for divergence change and advection storage
+// global pointers for storing vecs
+//__device__ char vectors[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)];
+//__device__ char vectorBuffer[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)]; // used for divergence change and advection storage
+__device__ char* vectors, vectorBuffer;
 
 __device__ bool barrier[grid_l * grid_h];
 
@@ -57,8 +60,8 @@ __device__ bool barrier[grid_l * grid_h];
 #define horizontalVectors ((vec2*)vectors)
 #define verticalVectors ((vec2*)(vectors + numHorizontal * sizeof(vec2)))
 
-#define horizontalVectorsBuffer ((vec2*)vectorsBuffer)
-#define verticalVectorsBuffer ((vec2*)(vectorsBuffer + numHorizontal * sizeof(vec2)))
+#define horizontalVectorsBuffer ((vec2*)vectorBuffer)
+#define verticalVectorsBuffer ((vec2*)(vectorBuffer + numHorizontal * sizeof(vec2)))
 
 #define rightVecIndex(cellX, cellY) (cellX + 1 + cellY * (grid_l + 1)) 
 #define leftVecIndex(cellX, cellY) (cellX + cellY * (grid_l + 1))
@@ -70,6 +73,11 @@ __device__ bool barrier[grid_l * grid_h];
 
 #define inVerticalBounds(x, y) (x >= 0 && x < grid_l && y >= 0 && y <= grid_h)
 #define inHorizontalBounds(x, y) (x >= 0 && x <= grid_l && y >= 0 && y < grid_h)
+
+#define inCellBounds(x, y) (x >= 0 && x < grid_l && y >= 0 && y < grid_h)
+
+#define cellXFromPos(p) (int)p.x
+#define cellYFromPos(p) (int)p.y
 
 // init grid
 inline __device__ void init_vec() {
@@ -110,6 +118,13 @@ inline __device__ void set_barrier(const int x, const int y) {
 // reset kernels
 __global__ void resetVectors() {
     init_vec();
+}
+
+// copy kernels
+__global__ void swapBuffer() {
+    char* tmp = vectors;
+    vectors = vectorBuffer;
+    vectorBuffer = tmp;
 }
 
 // divergence functions and kernel
@@ -206,7 +221,94 @@ inline __device__ vec2 sample_surrounding_vecs_V(const int x, const int y) {
 
     const float hor_comp = (horizontalVectors[horizontalVecIndex(x, y)].y * inHorizontalBounds(x, y) + horizontalVectors[horizontalVecIndex(x + 1, y)].y * inHorizontalBounds(x + 1, y) + horizontalVectors[horizontalVecIndex(x, y - 1)].y * inHorizontalBounds(x, y - 1) + horizontalVectors[horizontalVecIndex(x + 1, y - 1)].y * inHorizontalBounds(x + 1, y - 1)) / num_hors;// bounds calcs redone to avoid branching(may be slower on some systems)
 
-    return vec2(hor_comp, verticalVectors[verticalVecIndex(x, y)]);
+    return vec2(hor_comp, verticalVectors[verticalVecIndex(x, y)].y);
+}
+
+inline __device__ vec2 get_previous_value_V(const int x, const int y) {
+    // get the velocity value the vector comes from and advect it
+    // semi lagrangian advection
+    vec2 ret = verticalVectors[verticalVecIndex(x, y)];
+    const vec2 previous_path = sample_surrounding_vecs_V(x, y) * -1;
+    const vec2 pos = vec2(x + 0.5f, y) + previous_path;
+
+    const int px = cellXFromPos(pos);
+    const int py = cellYFromPos(pos);
+    if (!inCellBounds(px, py)) { return ret; }
+
+    ret.y = 0.0f; // gonna add to it later
+
+    // right bottom cell
+    const int cellxy_offset[] = {px+1, px-1, py+1, py-1};
+    unsigned char num_sampled = 0;
+
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        const unsigned char xo = (i < 2) * cellxy_offset[i]; // avoid branching and only have one loop
+        const unsigned char yo = (i >= 2) * cellxy_offset[i];
+        if (!inCellBounds(px + xo, py + yo)) { continue; } // branching unavoidable
+
+        num_sampled += 2;
+        ret.y += verticalVectors[upVecIndex(px + xo, py + yo)].y + verticalVectors[downVecIndex(px + xo, py + yo)].y;
+    }
+    ret.y /= num_sampled;
+    return ret;
+}
+
+inline __device__ vec2 get_previous_value_H(const int x, const int y) {
+    // get the velocity value the vector comes from and advect it
+    // semi lagrangian advection
+    vec2 ret = horizontalVectors[horizontalVecIndex(x, y)];
+    const vec2 previous_path = sample_surrounding_vecs_H(x, y) * -1;
+    const vec2 pos = vec2(x, y + 0.5f) + previous_path;
+
+    const int px = cellXFromPos(pos);
+    const int py = cellYFromPos(pos);
+    if (!inCellBounds(px, py)) { return ret; }
+
+    ret.x = 0.0f; // gonna add to it later
+
+    // right bottom cell
+    const int cellxy_offset[] = { px + 1, px - 1, py + 1, py - 1 };
+    unsigned char num_sampled = 0;
+
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        const unsigned char xo = (i < 2) * cellxy_offset[i]; // avoid branching and only have one loop
+        const unsigned char yo = (i >= 2) * cellxy_offset[i];
+        if (!inCellBounds(px + xo, py + yo)) { continue; } // branching unavoidable
+
+        num_sampled += 2;
+        ret.x += horizontalVectors[rightVecIndex(px + xo, py + yo)].y + horizontalVectors[leftVecIndex(px + xo, py + yo)].y;
+    }
+    ret.x /= num_sampled;
+    return ret;
+}
+
+__global__ void advectionKernel() {
+    // advects 2-4 vectors instead of 1 vector to distribute workload amongst more threads
+    const int id = threadIdx.x + blockIdx.x * blockDim.x;
+
+    const int cx = id % grid_l;
+    const int cy = id / grid_l;
+    
+    // buffer must be used to prevent reads and writes at the same time, and to keep results accurate
+    horizontalVectorsBuffer[leftVecIndex(cx, cy)] = get_previous_value_H(cx, cy);
+    verticalVectorsBuffer[upVecIndex(cx, cy)] = get_previous_value_V(cx, cy);
+
+    // unavoidable branching(i think)
+    if (cx == grid_l - 1) {
+        horizontalVectorsBuffer[rightVecIndex(cx, cy)] = get_previous_value_H(cx+1, cy);
+    }
+    if (cy == grid_h - 1) {
+        verticalVectorsBuffer[downVecIndex(cx, cy)] = get_previous_value_V(cx, cy+1);
+    }
+}
+
+#define threads_advection 512
+#define blocks_advection grid_l * grid_h / threads_advection
+void semiLagrangianAdvection() {
+    advectionKernel << <threads_advection, blocks_advection >> > ();
+    swapBuffer << <1, 1 >> > ();
 }
 
 //*****************************************************************************************************************************************************************************************
