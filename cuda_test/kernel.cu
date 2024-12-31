@@ -65,6 +65,12 @@ __device__ bool barrier[grid_l * grid_h];
 #define upVecIndex(cellX, cellY) (cellX + cellY * grid_l)
 #define downVecIndex(cellX, cellY) (cellX + (cellY+1) * grid_l)
 
+#define verticalVecIndex(x, y) (x + y * (grid_l))
+#define horizontalVecIndex(x, y) (x + y * (grid_l+1))
+
+#define inVerticalBounds(x, y) (x >= 0 && x < grid_l && y >= 0 && y <= grid_h)
+#define inHorizontalBounds(x, y) (x >= 0 && x <= grid_l && y >= 0 && y < grid_h)
+
 // init grid
 inline __device__ void init_vec() {
     const int id = threadIdx.x + blockIdx.x * blockDim.x;
@@ -99,6 +105,11 @@ inline __device__ void init_barrier() {
 // set val for a single barrier
 inline __device__ void set_barrier(const int x, const int y) {
     barrier[x + y * grid_l] = true;
+}
+
+// reset kernels
+__global__ void resetVectors() {
+    init_vec();
 }
 
 // divergence functions and kernel
@@ -175,6 +186,27 @@ void gaussianDivergenceSolver(const int passes) {
         divergenceGaussianW << <threads_divergence, blocks_divergence >> > ();
         divergenceGaussianB << <threads_divergence, blocks_divergence >> > ();
     }
+}
+
+// advection functions and kernel
+//*****************************************************************************************************************************************************************************************
+
+inline __device__ vec2 sample_surrounding_vecs_H(const int x, const int y) {
+    // gets the avg vertical component around a horizontal vector at (x, y). returns both the horizontal vector and the vertical component in a vec2
+    const unsigned char num_verts = inVerticalBounds(x, y) + inVerticalBounds(x + 1, y) + inVerticalBounds(x, y + 1) + inVerticalBounds(x + 1, y + 1);// num of vertical vecs sampled
+
+    const float vert_comp = (verticalVectors[verticalVecIndex(x, y)].y * inVerticalBounds(x, y) + verticalVectors[verticalVecIndex(x+1, y)].y * inVerticalBounds(x+1, y) + verticalVectors[verticalVecIndex(x, y+1)].y * inVerticalBounds(x, y+1) + verticalVectors[verticalVecIndex(x+1, y+1)].y * inVerticalBounds(x+1, y+1)) / num_verts;// bounds calcs redone to avoid branching(may be slower on some systems)
+    
+    return vec2(horizontalVectors[horizontalVecIndex(x, y)].x, vert_comp);
+}
+
+inline __device__ vec2 sample_surrounding_vecs_V(const int x, const int y) {
+    // gets the avg horizontal component around a vertical vector at (x, y). returns both the horizontal vector and the vertical component in a vec2
+    const unsigned char num_hors = inHorizontalBounds(x, y) + inHorizontalBounds(x + 1, y) + inHorizontalBounds(x, y - 1) + inHorizontalBounds(x + 1, y - 1);// num of vertical vecs sampled
+
+    const float hor_comp = (horizontalVectors[horizontalVecIndex(x, y)].y * inHorizontalBounds(x, y) + horizontalVectors[horizontalVecIndex(x + 1, y)].y * inHorizontalBounds(x + 1, y) + horizontalVectors[horizontalVecIndex(x, y - 1)].y * inHorizontalBounds(x, y - 1) + horizontalVectors[horizontalVecIndex(x + 1, y - 1)].y * inHorizontalBounds(x + 1, y - 1)) / num_hors;// bounds calcs redone to avoid branching(may be slower on some systems)
+
+    return vec2(hor_comp, verticalVectors[verticalVecIndex(x, y)]);
 }
 
 //*****************************************************************************************************************************************************************************************
