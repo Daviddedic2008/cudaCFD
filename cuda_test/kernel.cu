@@ -9,6 +9,9 @@
 #include <time.h>
 #include <glad/glad.h>
 #include <glfw3.h>
+#include <string.h>
+
+#define DEBUG //if defined, extra stuff is printed(shouldn't slow down program noticeably)
 
 // init of structs and methods as well as global vars and respective functions and macros
 //*****************************************************************************************************************************************************************************************
@@ -23,7 +26,7 @@
 struct vec2 {
     float x, y;
 
-    __host__ __device__ vec2() : x(0), y(0) {}
+    __host__ __device__ vec2() : x(0.0f), y(0.0f) {}
 
     __host__ __device__ vec2(float X, float Y) : x(X), y(Y) {}
 
@@ -64,6 +67,9 @@ __device__ bool barrier[grid_l * grid_h];
 #define horizontalVectorsBuffer ((vec2*)vectorBuffer)
 #define verticalVectorsBuffer ((vec2*)(vectorBuffer + numHorizontal * sizeof(vec2)))
 
+#define horizontalVectorsCPU ((vec2*)cpuVecs)
+#define verticalVectorsCPU ((vec2*)(cpuVecs+ numHorizontal * sizeof(vec2)))
+
 #define rightVecIndex(cellX, cellY) (cellX + 1 + cellY * (grid_l + 1)) 
 #define leftVecIndex(cellX, cellY) (cellX + cellY * (grid_l + 1))
 #define upVecIndex(cellX, cellY) (cellX + cellY * grid_l)
@@ -84,13 +90,13 @@ __device__ bool barrier[grid_l * grid_h];
 inline __device__ void init_vec() {
     const int id = threadIdx.x + blockIdx.x * blockDim.x;
     const int x = id % grid_l;
-    const int y = id / grid_h;
+    const int y = id / grid_l;
 
     // set all vals to 0
-    horizontalVectors[rightVecIndex(x, y)] = vec2();
-    horizontalVectors[leftVecIndex(x, y)] = vec2();
-    verticalVectors[upVecIndex(x, y)] = vec2();
-    verticalVectors[downVecIndex(x, y)] = vec2();
+    horizontalVectors[rightVecIndex(x, y)] = vec2(1.0f, 1.0f);
+    verticalVectors[upVecIndex(x, y)] = vec2(1.0f, 1.0f);
+    //verticalVectors[downVecIndex(x, y)] = vec2();
+    //horizontalVectors[leftVecIndex(x, y)] = vec2();
 }
 
 // sets both left and right vecs of cell to v
@@ -116,9 +122,29 @@ inline __device__ void set_barrier(const int x, const int y) {
     barrier[x + y * grid_l] = true;
 }
 
+__global__ void setBarrier(const int x, const int y) {
+    set_barrier(x, y);
+}
+
+void setBar(const int x, const int y) {
+    setBarrier << <1, 1 >> > (x, y);
+}
+
 // reset kernels
 __global__ void resetVectors() {
     init_vec();
+}
+
+__global__ void resetBarriers() {
+    init_barrier();
+}
+
+void resetVecs() {
+    resetVectors << <512, grid_l * grid_h / 512 >> > ();
+}
+
+void resetBars() {
+    resetBarriers << <512, grid_l * grid_h / 512 >> > ();
 }
 
 // copy kernels
@@ -312,17 +338,106 @@ void semiLagrangianAdvection() {
     swapBuffer << <1, 1 >> > ();
 }
 
-// alloc
+// alloc and mem moving functions
 //*****************************************************************************************************************************************************************************************
+
+char cpuVecs[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)];
+bool cpuBarrier[grid_l * grid_h];
+
+char* deviceVecPointer;
+char* deviceVecBufferPointer;
 
 void allocDeviceVars() {
     // tmp cpu pointer used
-    char* temp;
+    #ifdef DEBUG
+    cudaError_t m1, m2, c1, c2;
+    m1 = cudaMalloc((void**)(&deviceVecPointer), (grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2));
+    c1 = cudaMemcpyToSymbol(vectors, &deviceVecPointer, sizeof(char*));
+    
+    m2 = cudaMalloc((void**)(&deviceVecBufferPointer), (grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2));
+    c2 = cudaMemcpyToSymbol(vectorBuffer, &deviceVecBufferPointer, sizeof(char*));
+
+    printf("alloc one     malloc: %s | copy: %s\n", cudaGetErrorString(m1), cudaGetErrorString(c1));
+    printf("alloc two     malloc: %s | copy: %s\n", cudaGetErrorString(m2), cudaGetErrorString(c2));
+    #endif
+
+    #ifndef DEBUG
     cudaMalloc((void**)(&temp), (grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2));
     cudaMemcpyToSymbol(vectors, &temp, sizeof(char*));
 
     cudaMalloc((void**)(&temp), (grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2));
     cudaMemcpyToSymbol(vectorBuffer, &temp, sizeof(char*));
+    #endif
+}
+
+void moveMainArrayToCPU() {
+    cudaError_t e = cudaMemcpy(cpuVecs, deviceVecPointer, (grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2), cudaMemcpyDeviceToHost);
+#ifdef DEBUG
+    printf("copy vecs: %s\n", cudaGetErrorString(e));
+#endif
+}
+
+void moveBarrierToCPU() {
+    cudaError_t e = cudaMemcpyFromSymbol(cpuBarrier, barrier, grid_l * grid_h * sizeof(bool));
+#ifdef DEBUG
+    printf("copy barrier: %s\n", cudaGetErrorString(e));
+#endif
+}
+
+// sampling vector field for drawing
+//*****************************************************************************************************************************************************************************************
+
+struct color {
+    unsigned char r, g, b;
+
+    __host__ __device__ color() : r(0), g(0), b(0){}
+    __host__ __device__ color(float red, float green, float blue) : r(red), g(green), b(blue) {}
+};
+
+color sampleFieldVelocityMagnitude(const int x, const int y, float threshold) {
+    const float total = fabs(horizontalVectorsCPU[rightVecIndex(x, y)].x - horizontalVectorsCPU[leftVecIndex(x, y)].x + verticalVectorsCPU[upVecIndex(x, y)].y - verticalVectorsCPU[downVecIndex(x, y)].y);
+    float magnitude = total / threshold;
+    magnitude = (magnitude > 1.0f) ? 1.0f : magnitude;
+    return color(magnitude * 255, 0, 0);
+}
+
+color sampleFieldVelocityDirectionalMagnitude(const int x, const int y, float threshold) {
+    const float totalPos = fabs(horizontalVectorsCPU[rightVecIndex(x, y)].x + verticalVectorsCPU[upVecIndex(x, y)].y);
+    const float totalNeg = fabs(horizontalVectorsCPU[leftVecIndex(x, y)].x + verticalVectorsCPU[downVecIndex(x, y)].y);
+
+    float magnitudePos = totalPos / threshold;
+    float magnitudeNeg = totalNeg / threshold;
+
+    magnitudePos = (magnitudePos > 1.0f) ? 1.0f : magnitudePos;
+    magnitudeNeg = (magnitudeNeg > 1.0f) ? 1.0f : magnitudeNeg;
+
+    return color(magnitudePos * 255, magnitudeNeg * 255, 0);
+}
+
+unsigned char cpuColors[grid_l * grid_h];
+
+void fillColorArray(float threshold, char* sampleType) {
+    if (strcmp(sampleType, "magnitude") == 0) {
+        for (int x = 0; x < grid_l; x++) {
+            for (int y = 0; y < grid_h; y++) {
+                ((color*)cpuColors)[x + y * grid_l] = sampleFieldVelocityMagnitude(x, y, threshold);
+                if (cpuBarrier[x + y * grid_l]) {
+                    ((color*)cpuColors)[x + y * grid_l] = color(255, 255, 255);
+                }
+            }
+        }
+    }
+
+    if (strcmp(sampleType, "directional magnitude") == 0) {
+        for (int x = 0; x < grid_l; x++) {
+            for (int y = 0; y < grid_h; y++) {
+                ((color*)cpuColors)[x + y * grid_l] = sampleFieldVelocityDirectionalMagnitude(x, y, threshold);
+                if (cpuBarrier[x + y * grid_l]) {
+                    ((color*)cpuColors)[x + y * grid_l] = color(255, 255, 255);
+                }
+            }
+        }
+    }
 }
 
 //*****************************************************************************************************************************************************************************************
@@ -366,6 +481,21 @@ float truncate(float f) {
 
 int main()
 {
+    // alloc and set all global device arrays/pointers to 0
+    allocDeviceVars();
+    resetVecs();
+    resetBars();
+
+    // for now, make a square barrier
+    for (int x = 100; x < 200; x++) {
+        for (int y = 200; y < 300; y++) {
+            setBar(x, y);
+        }
+    }
+
+    moveMainArrayToCPU();
+    moveBarrierToCPU();
+
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -448,7 +578,7 @@ int main()
 	glEnableVertexAttribArray(2);
 
     unsigned int texture1;
-    uint8_t pixels[grid_h * grid_l * 3];
+    //uint8_t pixels[grid_h * grid_l * 3];
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glGenTextures(1, &texture1);
     glBindTexture(GL_TEXTURE_2D, texture1);
@@ -457,7 +587,7 @@ int main()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, grid_l, grid_h, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, grid_l, grid_h, 0, GL_RGB, GL_UNSIGNED_BYTE, cpuColors);
 	glGenerateMipmap(GL_TEXTURE_2D);
     glUseProgram(shaderProgram); 
     glUniform1i(glGetUniformLocation(shaderProgram, "texture1"), 0);
@@ -469,8 +599,9 @@ int main()
         int ind = 0;
         // **
         // dodaj boje tu u pixels
+        fillColorArray(3.0f, "directional magnitude");
         // **
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, grid_l, grid_h, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, grid_l, grid_h, 0, GL_RGB, GL_UNSIGNED_BYTE, cpuColors);
 		glGenerateMipmap(GL_TEXTURE_2D);
         // bind textures on corresponding texture units
         glActiveTexture(GL_TEXTURE0);
