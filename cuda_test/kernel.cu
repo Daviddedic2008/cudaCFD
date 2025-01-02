@@ -44,7 +44,8 @@ struct vec2 {
 // global pointers for storing vecs
 //__device__ char vectors[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)];
 //__device__ char vectorBuffer[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)]; // used for divergence change and advection storage
-__device__ char* vectors, vectorBuffer;
+__device__ char* vectors;
+__device__ char* vectorBuffer;
 
 __device__ bool barrier[grid_l * grid_h];
 
@@ -309,6 +310,19 @@ __global__ void advectionKernel() {
 void semiLagrangianAdvection() {
     advectionKernel << <threads_advection, blocks_advection >> > ();
     swapBuffer << <1, 1 >> > ();
+}
+
+// alloc
+//*****************************************************************************************************************************************************************************************
+
+void allocDeviceVars() {
+    // tmp cpu pointer used
+    char* temp;
+    cudaMalloc((void**)(&temp), (grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2));
+    cudaMemcpyToSymbol(vectors, &temp, sizeof(char*));
+
+    cudaMalloc((void**)(&temp), (grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2));
+    cudaMemcpyToSymbol(vectorBuffer, &temp, sizeof(char*));
 }
 
 //*****************************************************************************************************************************************************************************************
