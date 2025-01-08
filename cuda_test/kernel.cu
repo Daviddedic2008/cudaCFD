@@ -11,13 +11,16 @@
 #include <glfw3.h>
 #include <string.h>
 
+cudaError_t ercall;
+#define CCALL(call) ercall = call; if(cudaSuccess != ercall){fprintf(stderr, "Cuda error in file '%s' in line %i : %s.\n", __FILE__, __LINE__, cudaGetErrorString(ercall)); exit(EXIT_FAILURE);}
+
 //#define DEBUG //if defined, extra stuff is printed(shouldn't slow down program noticeably)
 
 // init of structs and methods as well as global vars and respective functions and macros
 //*****************************************************************************************************************************************************************************************
 
 // sizes for cfd
-#define grid_l 512
+#define grid_l 511
 #define grid_h 512
 
 // overrelaxation
@@ -48,10 +51,8 @@ struct vec2 {
 #pragma pop
 
 // global pointers for storing vecs
-//__device__ char vectors[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)];
-//__device__ char vectorBuffer[(grid_l * (grid_h + 1) + grid_h * (grid_l + 1)) * sizeof(vec2)]; // used for divergence change and advection storage
-__device__ char* vectors;
-__device__ char* vectorBuffer;
+__device__ char* vectors; // main array
+__device__ char* vectorBuffer; // buffer for divergence and advection
 
 __device__ bool barrier[grid_l * grid_h];
 
@@ -198,7 +199,7 @@ __global__ void swapBuffer() {
 
 // calcs divergence for a single cell
 inline __device__ double calc_divergence(const int x, const int y) {
-    return (verticalVectors[upVecIndex(x, y)].y - verticalVectors[downVecIndex(x, y)].y + horizontalVectors[rightVecIndex(x, y)].x - horizontalVectors[leftVecIndex(x, y)].x) * overrelax_const;
+    return (verticalVectors[upVecIndex(x, y)].y * inCellBounds(x, y) - verticalVectors[downVecIndex(x, y)].y * inCellBounds(x, y) + horizontalVectors[rightVecIndex(x, y)].x * inCellBounds(x, y) - horizontalVectors[leftVecIndex(x, y)].x * inCellBounds(x, y)) * overrelax_const;
 }
 
 #define L 0
@@ -206,35 +207,33 @@ inline __device__ double calc_divergence(const int x, const int y) {
 #define T 2
 #define B 3
 inline __device__ void apply_divergence(const int x, const int y) {
-    double divergence = calc_divergence(x, y);
-    if (x == 5 && y == 101) {
-        printf("%f\n", divergence);
-        printf("%f %f %f %f\n", horizontalVectors[rightVecIndex(x, y)].x, horizontalVectors[leftVecIndex(x, y)].x, verticalVectors[upVecIndex(x, y)].y, verticalVectors[downVecIndex(x, y)].y);
-    }
-    unsigned char num_affected = 0;
     bool affected_cells[4];
     ((char32_t*)affected_cells)[0] = 0;
+
+    unsigned char num_affected = 0;
+
+    if (barrier[x + y * grid_l]) { return; }
 
     // get rights
     #pragma unroll
     for (int xo = -1; xo <= 1; xo += 2) {
-        //if (!inCellBounds(x+xo, y)) { continue; }
-        const bool tmp = !barrier[x + xo + y * grid_l];
-        num_affected += tmp;
-        affected_cells[(xo + 1) / 2] = tmp;
+        if (!inCellBounds(x+xo, y) || barrier[x + xo + y * grid_l]) { continue; }
+        
+        num_affected += 1;
+        affected_cells[(xo + 1) / 2] = true;
     }
 
     // get bottoms
     #pragma unroll
     for (int yo = -1; yo <= 1; yo += 2) {
-        if (!inCellBounds(x, y + yo)) { continue; }
-        const bool tmp = !barrier[x + (y + yo) * grid_l];
-        num_affected += tmp;
-        affected_cells[(yo + 5) / 2] = tmp;
+        if (!inCellBounds(x, y + yo) || barrier[x + (y + yo) * grid_l]) { continue; }
+        
+        num_affected += 1;
+        affected_cells[(yo + 5) / 2] = true;
     }
 
-    if (num_affected == 0) { return; }
-    divergence /= (float)num_affected;
+    const float divergence = calc_divergence(x, y) / (float)num_affected;
+
     // subtract the divergence equally from each affected vector(not blocked by a barrier)
     verticalVectorsBuffer[upVecIndex(x, y)].y -= divergence * affected_cells[T]; // up
     verticalVectorsBuffer[downVecIndex(x, y)].y += divergence * affected_cells[B]; // down
@@ -246,13 +245,13 @@ inline __device__ void apply_divergence(const int x, const int y) {
 // each pass is either "white" or "black", and these colors represent the squares on a checkerboard
 
 // threads per block divergence
-#define threads_divergence 512
+#define threads_divergence 256
 #define blocks_divergence (grid_l * grid_h / 2) / threads_divergence
 
 // divergence kernel "white"
 __global__ void divergenceGaussianW() {
     const int id = threadIdx.x + blockIdx.x * blockDim.x;
-    const int cellId = id * 2; // account for checkerboard spacing
+    const int cellId = id * 2;
     if (cellId >= grid_l * grid_h) { return; }
     apply_divergence(cellId % grid_l, cellId / grid_l); // may remove this func due to overhead
 }
@@ -277,48 +276,44 @@ __global__ void addBufferW() {
     const int cellId = id;
     if (cellId >= grid_l * grid_h) return; // avoid out-of-bounds access
 
-    // ensure safe memory access
+    // ensure no accessing same mem
     verticalVectors[upVecIndex(cellId % grid_l, cellId / grid_l)].y += verticalVectorsBuffer[upVecIndex(cellId % grid_l, cellId / grid_l)].y;
     horizontalVectors[leftVecIndex(cellId % grid_l, cellId / grid_l)].x += horizontalVectorsBuffer[leftVecIndex(cellId % grid_l, cellId / grid_l)].x;
-}
 
-__global__ void addBufferB() {
-    const int id = threadIdx.x + blockIdx.x * blockDim.x;
-    const int cellId = id;
-    if (cellId >= grid_l * grid_h) return; // avoid out-of-bounds access
+    if (cellId % grid_l == grid_l - 1) {
+        horizontalVectors[rightVecIndex(cellId % grid_l, cellId / grid_l)].x += horizontalVectorsBuffer[rightVecIndex(cellId % grid_l, cellId / grid_l)].x;
+    }
 
-    verticalVectors[downVecIndex(cellId % grid_l, cellId / grid_l)].y += verticalVectorsBuffer[downVecIndex(cellId % grid_l, cellId / grid_l)].y;
-    horizontalVectors[rightVecIndex(cellId % grid_l, cellId / grid_l)].x += horizontalVectorsBuffer[rightVecIndex(cellId % grid_l, cellId / grid_l)].x;
+    if (cellId / grid_l == grid_h - 1) {
+        verticalVectors[downVecIndex(cellId % grid_l, cellId / grid_l)].y += verticalVectorsBuffer[downVecIndex(cellId % grid_l, cellId / grid_l)].y;
+    }
 }
 
 void addBuf() {
     int totalThreads = grid_l * grid_h;
     int blocks = (totalThreads + 511) / 512;
     addBufferW << <blocks, 512 >> > ();
-    cudaDeviceSynchronize();
-    addBufferB << <blocks, 512 >> > ();
-    cudaDeviceSynchronize();
+    CCALL(cudaDeviceSynchronize());
 }
 
 
 // cpu function to call kernels
 void gaussianDivergenceSolver(const int passes) {
-    resetVecsBuf();
     cudaDeviceSynchronize();
     for (int p = 0; p < passes; p++) {
-#ifndef ovr
-        cudaDeviceSynchronize();
+        resetVecsBuf();
         divergenceGaussianB << <threads_divergence, blocks_divergence >> > ();
         cudaDeviceSynchronize();
         divergenceGaussianW << <threads_divergence, blocks_divergence>> > ();
         cudaDeviceSynchronize();
         addBuf();
-        goto skpovr;
-#endif
-        divergenceOvr << <threads_divergence, blocks_divergence*2 >> > ();
+
+        resetVecsBuf();
+        divergenceGaussianW << <threads_divergence, blocks_divergence >> > ();
+        cudaDeviceSynchronize();
+        divergenceGaussianB << <threads_divergence, blocks_divergence >> > ();
         cudaDeviceSynchronize();
         addBuf();
-    skpovr:;
     }
 }
 
@@ -494,8 +489,8 @@ color sampleFieldVelocityMagnitude(const int x, const int y, float threshold) {
 }
 
 color sampleFieldVelocityDirectionalMagnitude(const int x, const int y, float threshold) {
-    const float totalPos = fabs(horizontalVectorsCPU[rightVecIndex(x, y)].x + verticalVectorsCPU[upVecIndex(x, y)].y);
-    const float totalNeg = fabs(horizontalVectorsCPU[leftVecIndex(x, y)].x + verticalVectorsCPU[downVecIndex(x, y)].y);
+    const float totalPos = fabs(horizontalVectorsCPU[rightVecIndex(x, y)].x) + fabs(verticalVectorsCPU[upVecIndex(x, y)].y);
+    const float totalNeg = fabs(horizontalVectorsCPU[leftVecIndex(x, y)].x) + fabs(verticalVectorsCPU[downVecIndex(x, y)].y);
 
     float magnitudePos = totalPos / threshold;
     float magnitudeNeg = totalNeg / threshold;
@@ -579,8 +574,8 @@ int main()
     resetBars();
 
     // for now, make a square barrier
-    for (int x = 100; x < 200; x++) {
-        for (int y = 200; y < 300; y++) {
+    for (int x = 50; x < 100; x++) {
+        for (int y = 256-25; y < 256+25; y++) {
             setBar(x, y);
         }
     }
@@ -688,18 +683,22 @@ int main()
 	glGenerateMipmap(GL_TEXTURE_2D);
     glUseProgram(shaderProgram); 
     glUniform1i(glGetUniformLocation(shaderProgram, "texture1"), 0);
+
+    clock_t start, end;
     while (!glfwWindowShouldClose(window))
     {
+        start = clock();
         processInput(window);
         glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         int ind = 0;
         // **
         // dodaj boje tu u pixels
-        gaussianDivergenceSolver(1);
+        gaussianDivergenceSolver(10);
+        //semiLagrangianAdvection();
 
         moveMainArrayToCPU();
-        fillColorArray(1.0f, "magnitude");
+        fillColorArray(0.5f, "directional magnitude");
         // **
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, grid_l, grid_h, 0, GL_RGB, GL_UNSIGNED_BYTE, cpuColors);
 		glGenerateMipmap(GL_TEXTURE_2D);
@@ -714,6 +713,10 @@ int main()
 
         glfwSwapBuffers(window);
         glfwPollEvents();
+        end = clock();
+        int fps = 1000 / (end - start);
+        fps = fps < 100 ? fps : 99;
+        printf("\rFPS: %d", fps);
     }
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
