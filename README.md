@@ -1,4 +1,4 @@
-Fluid dynamics simulation written in cuda and displayed via openGL. It is loosely based on the Navier-Stokes equations, and includes a divergence eliminator that uses very simplified gaussian elimination. The program also applies advection, and displays only a velocity field for now. The visualisation can be generalized for many attributes, such as pressure, density, etc.
+Fluid dynamics simulation written in cuda and displayed via openGL. It is loosely based on the Navier-Stokes equations, and includes a divergence eliminator that uses very simplified gaussian elimination. The program also applies advection, and displays only a velocity field for now(either magnitude, or directional magnitude). The visualisation can be generalized for many attributes, such as pressure, density, etc.
 
 
 images:
