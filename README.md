@@ -5,3 +5,5 @@ images:
 
 _solving for ONLY divergence:_
 ![image](https://github.com/user-attachments/assets/45d940c8-1b9e-4d98-9c2a-76574c0c78ff)
+
+![image](https://github.com/user-attachments/assets/b1849448-4f4d-4931-b5a4-4f50f792af56)
