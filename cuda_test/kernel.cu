@@ -139,8 +139,16 @@ __global__ void setHorizontalVec(const vec2 v, const int x, const int y) {
     set_horizontal_vec_cell(v, x, y);
 }
 
+__global__ void setVerticalVec(const vec2 v, const int x, const int y) {
+    set_vertical_vec_cell(v, x, y);
+}
+
 void setHorVecs(const vec2 v, const int x, const int y) {
     setHorizontalVec << <1, 1 >> > (v, x, y);
+}
+
+void setVertVecs(const vec2 v, const int x, const int y) {
+    setVerticalVec << <1, 1 >> > (v, x, y);
 }
 
 // init barrier
@@ -347,13 +355,16 @@ __global__ void advectionKernelW() {
     const int prevCellX = (int)prev_pos.x;
     const int prevCellY = (int)prev_pos.y;
 
-    if (barrier[cellX + cellY * grid_l] || barrier[prevCellX + prevCellY * grid_l] || !inCellBounds(prevCellX, prevCellY) || !inCellBounds(cellX, cellY)) { return; }
+    const float xOffsetFromLeft = prev_pos.x - prevCellX;
+    const float yOffsetFromTop = prev_pos.y - prevCellY;
 
-    horizontalVectorsBuffer[rightVecIndex(cellX, cellY)] = horizontalVectors[rightVecIndex(prevCellX, prevCellY)] * (cellX == grid_l - 1 ? 1.0f : 0.5f);
-    horizontalVectorsBuffer[leftVecIndex(cellX, cellY)] = horizontalVectors[leftVecIndex(prevCellX, prevCellY)] * (cellX == 0 ? 1.0f : 0.5f);
+    if (barrier[prevCellX + prevCellY * grid_l] || !inCellBounds(prevCellX, prevCellY) || !inCellBounds(cellX, cellY)) { return; }
 
-    verticalVectorsBuffer[upVecIndex(cellX, cellY)] = verticalVectors[upVecIndex(prevCellX, prevCellY)] * (cellY == 0 ? 1.0f : 0.5f);
-    verticalVectorsBuffer[downVecIndex(cellX, cellY)] = verticalVectors[downVecIndex(prevCellX, prevCellY)] * (cellY == grid_h - 1 ? 1.0f : 0.5f);
+    horizontalVectorsBuffer[rightVecIndex(cellX, cellY)] = horizontalVectors[rightVecIndex(prevCellX, prevCellY)] * xOffsetFromLeft * (cellX == grid_l - 1 ? 1.0f : 0.5f);
+    horizontalVectorsBuffer[leftVecIndex(cellX, cellY)] = horizontalVectors[leftVecIndex(prevCellX, prevCellY)] * (1-xOffsetFromLeft) * (cellX == 0 ? 1.0f : 0.5f);
+
+    verticalVectorsBuffer[upVecIndex(cellX, cellY)] = verticalVectors[upVecIndex(prevCellX, prevCellY)] * (1-yOffsetFromTop) * (cellY == 0 ? 1.0f : 0.5f);
+    verticalVectorsBuffer[downVecIndex(cellX, cellY)] = verticalVectors[downVecIndex(prevCellX, prevCellY)] * yOffsetFromTop * (cellY == grid_h - 1 ? 1.0f : 0.5f);
 }
 
 __global__ void advectionKernelB() {
@@ -363,18 +374,21 @@ __global__ void advectionKernelB() {
 
     if (!inCellBounds(cellX, cellY)) { return; }
 
-    const vec2 prev_pos = vec2(cellX + 0.5f, cellY + 0.5f) - horizontalVectors[rightVecIndex(cellX, cellY)] - horizontalVectors[leftVecIndex(cellX, cellY)] - verticalVectors[upVecIndex(cellX, cellY)] - verticalVectors[downVecIndex(cellX, cellY)];
+    const vec2 prev_pos = vec2(cellX + 0.5f, cellY+0.5f) - horizontalVectors[rightVecIndex(cellX, cellY)] - horizontalVectors[leftVecIndex(cellX, cellY)] - verticalVectors[upVecIndex(cellX, cellY)] - verticalVectors[downVecIndex(cellX, cellY)];
 
     const int prevCellX = (int)prev_pos.x;
     const int prevCellY = (int)prev_pos.y;
 
-    if (barrier[cellX + cellY * grid_l] || barrier[prevCellX + prevCellY * grid_l] || !inCellBounds(prevCellX, prevCellY) || !inCellBounds(cellX, cellY)) { return; }
+    const float xOffsetFromLeft = prev_pos.x - prevCellX;
+    const float yOffsetFromTop = prev_pos.y - prevCellY;
 
-    horizontalVectorsBuffer[rightVecIndex(cellX, cellY)] = horizontalVectorsBuffer[rightVecIndex(cellX, cellY)] + horizontalVectors[rightVecIndex(prevCellX, prevCellY)] * (cellX == grid_l - 1 ? 1.0f : 0.5f);
-    horizontalVectorsBuffer[leftVecIndex(cellX, cellY)] = horizontalVectorsBuffer[leftVecIndex(cellX, cellY)] + horizontalVectors[leftVecIndex(prevCellX, prevCellY)] * (cellX == 0 ? 1.0f : 0.5f);
+    if (barrier[prevCellX + prevCellY * grid_l] || !inCellBounds(prevCellX, prevCellY) || !inCellBounds(cellX, cellY)) { return; }
 
-    verticalVectorsBuffer[upVecIndex(cellX, cellY)] = verticalVectorsBuffer[upVecIndex(cellX, cellY)] + verticalVectors[upVecIndex(prevCellX, prevCellY)] * (cellY == 0 ? 1.0f : 0.5f);
-    verticalVectorsBuffer[downVecIndex(cellX, cellY)] = verticalVectorsBuffer[downVecIndex(cellX, cellY)] + verticalVectors[downVecIndex(prevCellX, prevCellY)] * (cellY == grid_h - 1 ? 1.0f : 0.5f);
+    horizontalVectorsBuffer[rightVecIndex(cellX, cellY)] = horizontalVectorsBuffer[rightVecIndex(cellX, cellY)] + horizontalVectors[rightVecIndex(prevCellX, prevCellY)] * xOffsetFromLeft * (cellX == grid_l - 1 ? 1.0f : 0.5f);
+    horizontalVectorsBuffer[leftVecIndex(cellX, cellY)] = horizontalVectorsBuffer[leftVecIndex(cellX, cellY)] + horizontalVectors[leftVecIndex(prevCellX, prevCellY)] * (1-xOffsetFromLeft) * (cellX == 0 ? 1.0f : 0.5f);
+    
+    verticalVectorsBuffer[upVecIndex(cellX, cellY)] = verticalVectorsBuffer[upVecIndex(cellX, cellY)] + verticalVectors[upVecIndex(prevCellX, prevCellY)] * (1-yOffsetFromTop) * (cellY == 0 ? 1.0f : 0.5f);
+    verticalVectorsBuffer[downVecIndex(cellX, cellY)] = verticalVectorsBuffer[downVecIndex(cellX, cellY)] + verticalVectors[downVecIndex(prevCellX, prevCellY)] * yOffsetFromTop * (cellY == grid_h - 1 ? 1.0f : 0.5f);
 }
 
 __global__ void copyFromBuffer() {
@@ -401,12 +415,16 @@ void semiLagrangianAdvection() {
     CCALL(cudaDeviceSynchronize());
     copyFromBuffer << <threads_advection, blocks_advection*2 >> > ();
     CCALL(cudaDeviceSynchronize());
-    advectionKernelB << <threads_advection, blocks_advection >> > ();
-    CCALL(cudaDeviceSynchronize());
-    advectionKernelW << <threads_advection, blocks_advection >> > ();
-    CCALL(cudaDeviceSynchronize());
     copyFromBuffer << <threads_advection, blocks_advection * 2 >> > ();
     CCALL(cudaDeviceSynchronize());
+}
+
+// gravity!
+__global__ void add_grav(const float strength) {
+    const int cellId = threadIdx.x + blockIdx.x * blockDim.x;
+    const int x = cellId % grid_l;
+    const int y = cellId / grid_l;
+    //if()
 }
 
 // alloc and mem moving functions
@@ -554,7 +572,7 @@ float truncate(float f) {
 // called every frame
 void updateFluid(float v) {
     
-    gaussianDivergenceSolver(500);
+    gaussianDivergenceSolver(400);
     semiLagrangianAdvection();
     moveMainArrayToCPU();
     fillColorArray(v, "directional magnitude");
@@ -567,12 +585,11 @@ int main()
     resetVecs();
     resetBars();
 
-    float fluidvel = 20.0f;
+    float fluidvel = 1.0f;
 
-    // for now, make a square barrier
     int xcenter = 100;
     int ycenter = 100;
-    int radius = 30;
+    float radius = 30.0f;
     for (int x = 0; x < grid_l; x++) {
         for (int y = 0; y < grid_h; y++) {
             if (sqrt((x - xcenter) * (x - xcenter) + (y - ycenter) * (y - ycenter)) < radius) {
@@ -581,9 +598,20 @@ int main()
         }
     }
 
-    for (int x = 0; x < 20; x++) {
+    xcenter = 100;
+    ycenter = 180;
+    for (int x = 0; x < grid_l; x++) {
+        for (int y = 0; y < grid_h; y++) {
+            if (sqrt((x - xcenter) * (x - xcenter) + (y - ycenter) * (y - ycenter)) < radius) {
+                setBar(x, y);
+            }
+        }
+    }
+
+    for (int x = 0; x < 30; x++) {
         for (int y = 0; y < grid_h; y++) {
             setHorVecs(vec2(fluidvel, 0.0f), x, y);
+            //setVertVecs(vec2(0.0f, fluidvel), x, y);
         }
     }
 
@@ -686,7 +714,7 @@ int main()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);	
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST_MIPMAP_NEAREST);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, grid_l, grid_h, 0, GL_RGB, GL_UNSIGNED_BYTE, cpuColors);
 	glGenerateMipmap(GL_TEXTURE_2D);
     glUseProgram(shaderProgram); 
