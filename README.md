@@ -13,4 +13,7 @@ _solving for divergence and advection:_
 
 ![image](https://github.com/user-attachments/assets/671df627-0281-4b71-92fa-e613d0ccf9a4)
 ![image](https://github.com/user-attachments/assets/c6bcff4c-22e6-4d8e-82ab-0c296be38589)
+![image](https://github.com/user-attachments/assets/4a506e19-c914-4b0b-babf-55e75f91886d)
+![image](https://github.com/user-attachments/assets/b46924e5-cefb-4280-8156-994ec28d5e35)
+
 
