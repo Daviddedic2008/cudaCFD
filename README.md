@@ -7,3 +7,8 @@ _solving for ONLY divergence:_
 ![image](https://github.com/user-attachments/assets/45d940c8-1b9e-4d98-9c2a-76574c0c78ff)
 
 ![image](https://github.com/user-attachments/assets/b1849448-4f4d-4931-b5a4-4f50f792af56)
+
+_solving for divergence and advection:_
+![image](https://github.com/user-attachments/assets/c91cafa0-6c11-487b-82d3-7e508b6a3bd1)
+
+![image](https://github.com/user-attachments/assets/671df627-0281-4b71-92fa-e613d0ccf9a4)
