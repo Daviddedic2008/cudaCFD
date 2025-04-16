@@ -9,11 +9,8 @@ _solving for ONLY divergence:_
 ![image](https://github.com/user-attachments/assets/b1849448-4f4d-4931-b5a4-4f50f792af56)
 
 _solving for divergence and advection:_
-![image](https://github.com/user-attachments/assets/c91cafa0-6c11-487b-82d3-7e508b6a3bd1)
 
-![image](https://github.com/user-attachments/assets/671df627-0281-4b71-92fa-e613d0ccf9a4)
 ![image](https://github.com/user-attachments/assets/c6bcff4c-22e6-4d8e-82ab-0c296be38589)
-![image](https://github.com/user-attachments/assets/4a506e19-c914-4b0b-babf-55e75f91886d)
 ![image](https://github.com/user-attachments/assets/b46924e5-cefb-4280-8156-994ec28d5e35)
 
 
